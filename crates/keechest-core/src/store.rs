@@ -1,7 +1,7 @@
 //! Reading and writing vault files.
 
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -202,7 +202,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
-        if let Ok(d) = File::open(dir) {
+        if let Ok(d) = fs::File::open(dir) {
             let _ = d.sync_all();
         }
     }
