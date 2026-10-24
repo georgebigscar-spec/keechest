@@ -22,4 +22,6 @@ pub enum Error {
     Corrupted(String),
     #[error("encryption failed")]
     Encrypt,
+    #[error("can't import: {0}")]
+    Import(String),
 }

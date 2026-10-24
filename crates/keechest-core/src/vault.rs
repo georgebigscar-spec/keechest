@@ -49,6 +49,31 @@ pub struct Entry {
     /// Older passwords, newest first.
     #[serde(default)]
     pub history: Vec<HistoryItem>,
+    /// User-defined fields, in display order.
+    #[serde(default)]
+    pub fields: Vec<CustomField>,
+}
+
+/// A user-defined field, like a PIN, a security question or a recovery code.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct CustomField {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub value: String,
+    /// Shown masked and never searched, like the password.
+    #[serde(default)]
+    pub secret: bool,
+}
+
+impl CustomField {
+    pub fn new(name: impl Into<String>, value: impl Into<String>, secret: bool) -> Self {
+        let mut f = Self::default();
+        f.name = name.into();
+        f.value = value.into();
+        f.secret = secret;
+        f
+    }
 }
 
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -76,12 +101,16 @@ impl Entry {
     }
 
     /// Whether `query` (already lowercased) appears in any visible field.
-    /// Passwords and notes are not searched.
+    /// Passwords, notes and secret custom fields are not searched.
     pub fn matches(&self, query: &str) -> bool {
         query.is_empty()
             || [&self.title, &self.username, &self.url, &self.group]
                 .iter()
                 .any(|f| f.to_lowercase().contains(query))
+            || self.fields.iter().any(|f| {
+                f.name.to_lowercase().contains(query)
+                    || (!f.secret && f.value.to_lowercase().contains(query))
+            })
     }
 }
 
@@ -210,6 +239,18 @@ mod tests {
         assert!(v.get(&id).unwrap().matches("hub"));
         assert!(v.entries[1].matches("example"));
         assert!(!v.entries[1].matches("y"), "passwords are not searched");
+        v.entries[1]
+            .fields
+            .push(CustomField::new("Кодовое слово", "сирень", true));
+        v.entries[1]
+            .fields
+            .push(CustomField::new("Отделение", "Арбат", false));
+        assert!(v.entries[1].matches("кодовое"));
+        assert!(v.entries[1].matches("арбат"));
+        assert!(
+            !v.entries[1].matches("сирень"),
+            "secret values are not searched"
+        );
         assert!(v.remove(&id));
         assert!(!v.remove(&id));
         assert_eq!(v.entries.len(), 2);

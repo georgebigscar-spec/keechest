@@ -54,6 +54,18 @@ fn main() -> keechest_core::Result<()> {
             .generate()
             .unwrap()
             .to_string();
+        if title == "Банк" {
+            e.fields.push(keechest_core::CustomField::new(
+                "Кодовое слово",
+                "сирень",
+                true,
+            ));
+            e.fields.push(keechest_core::CustomField::new(
+                "Отделение",
+                "ул. Арбат, 1",
+                false,
+            ));
+        }
         if title == "Wi-Fi дома" {
             e.notes = "Сеть: HomeNet_5G\nРоутер в коридоре.".into();
         }

@@ -113,6 +113,7 @@ pub fn error_text(error: &Error) -> String {
         Error::WrongPasswordOrCorrupted => "Неверный мастер-пароль или файл повреждён.".into(),
         Error::Corrupted(e) => format!("Содержимое хранилища повреждено: {e}"),
         Error::Encrypt => "Не удалось зашифровать хранилище.".into(),
+        Error::Import(e) => format!("Не удалось импортировать: {e}"),
     }
 }
 

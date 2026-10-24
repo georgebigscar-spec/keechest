@@ -1,5 +1,6 @@
 //! The unlocked vault: navigation, the entry list, details and the editor.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use egui::{
@@ -11,13 +12,15 @@ use fluent_egui::{
     FluentTheme, InfoBar, ListTile, ListTileSelectionMode, NavigationView, PaneItem, PasswordBox,
     PasswordRevealMode, Severity, TextBox,
 };
-use keechest_core::{Entry, GeneratorOptions, Strength, Vault, VaultFile, Zeroizing, strength};
+use keechest_core::{
+    CustomField, Entry, GeneratorOptions, Strength, Vault, VaultFile, Zeroizing, strength,
+};
 use zeroize::Zeroize;
 
 use crate::clipboard::SecureClipboard;
 use crate::config::Config;
 use crate::generator_page::{self, GeneratorAction, GeneratorState};
-use crate::settings_page::{self, SettingsAction, SettingsState};
+use crate::settings_page::{self, ImportSource, SettingsAction, SettingsState};
 use crate::widgets::{caption, error_text, format_time, strength_meter};
 
 /// What the session shares with the app.
@@ -69,8 +72,8 @@ pub struct Session {
     selected: Option<String>,
     search: String,
     editor: Option<Editor>,
-    /// The selected entry's password is shown.
-    reveal: bool,
+    /// Which secrets of the selected entry are shown.
+    reveal: Reveal,
     confirm_delete: Option<String>,
     notice: Option<Notice>,
     generator: GeneratorState,
@@ -87,7 +90,7 @@ impl Session {
             selected: None,
             search: String::new(),
             editor: None,
-            reveal: false,
+            reveal: Reveal::default(),
             confirm_delete: None,
             notice: None,
             generator: GeneratorState::new(&cfg.generator),
@@ -354,7 +357,7 @@ impl Session {
         if let Some(id) = clicked {
             self.selected = Some(id);
             self.editor = None;
-            self.reveal = false;
+            self.reveal = Reveal::default();
         }
     }
 
@@ -390,7 +393,7 @@ impl Session {
         };
         match detail_ui(ui, entry, &mut self.reveal) {
             DetailAction::None => {}
-            DetailAction::Copy(what, text) => self.copy(&ctx, env, what, &text),
+            DetailAction::Copy(what, text) => self.copy(&ctx, env, &what, &text),
             DetailAction::Edit => self.editor = Some(Editor::new(entry.clone(), false)),
             DetailAction::Delete => self.confirm_delete = Some(entry.id.clone()),
             DetailAction::ToggleFavorite => {
@@ -417,6 +420,16 @@ impl Session {
         trimmed(&mut editor.draft.title);
         trimmed(&mut editor.draft.group);
         trimmed(&mut editor.draft.url);
+        editor
+            .draft
+            .fields
+            .retain(|f| !f.name.trim().is_empty() || !f.value.is_empty());
+        for f in &mut editor.draft.fields {
+            trimmed(&mut f.name);
+            if f.name.is_empty() {
+                f.name = "Поле".into();
+            }
+        }
         if editor.draft.title.is_empty() {
             editor.error = Some("Укажите название.".into());
             self.editor = Some(editor);
@@ -425,7 +438,7 @@ impl Session {
         let id = editor.draft.id.clone();
         self.vault.upsert(editor.draft);
         self.selected = Some(id);
-        self.reveal = false;
+        self.reveal = Reveal::default();
         if self.persist() {
             self.notify("Сохранено", "", Severity::Success);
         }
@@ -491,6 +504,41 @@ impl Session {
                 let action = settings_page::ui(ui, &mut self.settings, env, &self.file);
                 match action {
                     SettingsAction::None => {}
+                    SettingsAction::Error(message) => {
+                        self.notify("Ошибка", message, Severity::Error);
+                    }
+                    SettingsAction::Import(entries, source) => {
+                        let found = entries.len();
+                        let (added, skipped) = self.vault.merge(entries);
+                        if self.persist() {
+                            let mut message = format!("Добавлено {added} из {found}");
+                            if skipped > 0 {
+                                message.push_str(&format!(", дубликатов пропущено: {skipped}"));
+                            }
+                            message.push('.');
+                            if source == ImportSource::Csv {
+                                message.push_str(" Удалите исходный CSV: он не зашифрован.");
+                            }
+                            self.notify("Импорт завершён", message, Severity::Success);
+                        }
+                    }
+                    SettingsAction::ExportCsv(path) => {
+                        match keechest_core::interop::export_csv_file(&self.vault, &path) {
+                            Ok(()) => self.notify(
+                                "Экспорт завершён",
+                                format!(
+                                    "Записей: {}. Файл не зашифрован, удалите его после переноса.",
+                                    self.vault.entries.len()
+                                ),
+                                Severity::Warning,
+                            ),
+                            Err(e) => self.notify(
+                                "Не удалось экспортировать",
+                                error_text(&e),
+                                Severity::Error,
+                            ),
+                        }
+                    }
                     SettingsAction::Rename(name) => {
                         self.vault.name = name;
                         if self.persist() {
@@ -516,9 +564,16 @@ impl Session {
     }
 }
 
+#[derive(Default)]
+struct Reveal {
+    password: bool,
+    /// Indices of shown secret custom fields.
+    fields: HashSet<usize>,
+}
+
 enum DetailAction {
     None,
-    Copy(&'static str, Zeroizing<String>),
+    Copy(String, Zeroizing<String>),
     Edit,
     Delete,
     ToggleFavorite,
@@ -534,7 +589,7 @@ fn masked(len: usize) -> String {
     "•".repeat(len.clamp(8, 24))
 }
 
-fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut bool) -> DetailAction {
+fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut Reveal) -> DetailAction {
     let theme = FluentTheme::of(ui.ctx());
     let mut action = DetailAction::None;
     ScrollArea::vertical()
@@ -560,7 +615,7 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut bool) -> DetailAction {
                         .clicked()
                     {
                         action = DetailAction::Copy(
-                            "Логин скопирован",
+                            "Логин скопирован".into(),
                             Zeroizing::new(entry.username.clone()),
                         );
                     }
@@ -573,7 +628,7 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut bool) -> DetailAction {
                     ui.label(caption(ui, "не задан"));
                     return;
                 }
-                if *reveal {
+                if reveal.password {
                     ui.label(
                         RichText::new(entry.password.as_str())
                             .monospace()
@@ -582,7 +637,7 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut bool) -> DetailAction {
                 } else {
                     ui.label(RichText::new(masked(entry.password.chars().count())).size(15.0));
                 }
-                let toggle = if *reveal {
+                let toggle = if reveal.password {
                     "Скрыть"
                 } else {
                     "Показать"
@@ -591,14 +646,14 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut bool) -> DetailAction {
                     .add(Button::new(toggle).min_size(vec2(0.0, 26.0)))
                     .clicked()
                 {
-                    *reveal = !*reveal;
+                    reveal.password = !reveal.password;
                 }
                 if ui
                     .add(Button::new("Копировать").min_size(vec2(0.0, 26.0)))
                     .clicked()
                 {
                     action = DetailAction::Copy(
-                        "Пароль скопирован",
+                        "Пароль скопирован".into(),
                         Zeroizing::new(entry.password.clone()),
                     );
                 }
@@ -620,9 +675,62 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut bool) -> DetailAction {
                         .add(Button::new("Копировать").min_size(vec2(0.0, 26.0)))
                         .clicked()
                     {
-                        action =
-                            DetailAction::Copy("Адрес скопирован", Zeroizing::new(url.to_owned()));
+                        action = DetailAction::Copy(
+                            "Адрес скопирован".into(),
+                            Zeroizing::new(url.to_owned()),
+                        );
                     }
+                });
+            }
+
+            for (i, f) in entry.fields.iter().enumerate() {
+                if f.value.is_empty() {
+                    continue;
+                }
+                field_label(
+                    ui,
+                    if f.name.is_empty() {
+                        "Поле"
+                    } else {
+                        &f.name
+                    },
+                );
+                ui.push_id(("field", i), |ui| {
+                    ui.horizontal(|ui| {
+                        let shown = !f.secret || reveal.fields.contains(&i);
+                        if shown {
+                            let text = RichText::new(f.value.as_str());
+                            ui.add(
+                                egui::Label::new(if f.secret { text.monospace() } else { text })
+                                    .wrap(),
+                            );
+                        } else {
+                            ui.label(RichText::new(masked(f.value.chars().count())).size(15.0));
+                        }
+                        if f.secret {
+                            let toggle = if shown {
+                                "Скрыть"
+                            } else {
+                                "Показать"
+                            };
+                            if ui
+                                .add(Button::new(toggle).min_size(vec2(0.0, 26.0)))
+                                .clicked()
+                                && !reveal.fields.remove(&i)
+                            {
+                                reveal.fields.insert(i);
+                            }
+                        }
+                        if ui
+                            .add(Button::new("Копировать").min_size(vec2(0.0, 26.0)))
+                            .clicked()
+                        {
+                            action = DetailAction::Copy(
+                                format!("«{}» скопировано", f.name),
+                                Zeroizing::new(f.value.clone()),
+                            );
+                        }
+                    });
                 });
             }
 
@@ -641,7 +749,7 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut bool) -> DetailAction {
                     for (i, h) in entry.history.iter().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label(caption(ui, format_time(h.replaced)));
-                            if *reveal {
+                            if reveal.password {
                                 ui.label(RichText::new(h.password.as_str()).monospace());
                             } else {
                                 ui.label(masked(h.password.chars().count()));
@@ -654,7 +762,7 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut bool) -> DetailAction {
                                 .clicked()
                             {
                                 action = DetailAction::Copy(
-                                    "Старый пароль скопирован",
+                                    "Старый пароль скопирован".into(),
                                     Zeroizing::new(h.password.clone()),
                                 );
                             }
@@ -824,6 +932,8 @@ fn editor_ui(
                 .width(width)
                 .show(ui);
 
+            fields_editor(ui, &mut ed.draft.fields, width);
+
             field_label(ui, "Заметки");
             ui.add(
                 TextBox::multiline(&mut ed.draft.notes, 4)
@@ -855,4 +965,56 @@ fn editor_ui(
             }
         });
     action
+}
+
+/// Rows of name, value and a "secret" switch for the custom fields.
+fn fields_editor(ui: &mut Ui, fields: &mut Vec<CustomField>, width: f32) {
+    field_label(ui, "Дополнительные поля");
+    let mut remove = None;
+    // Wider than the other fields: the row also holds the switch and button.
+    let width = ui.available_width().min(width + 180.0);
+    let name_width = (width * 0.3).round();
+    let controls = 130.0 + 3.0 * ui.spacing().item_spacing.x;
+    for (i, f) in fields.iter_mut().enumerate() {
+        ui.push_id(("ed_field", i), |ui| {
+            ui.horizontal(|ui| {
+                ui.add(
+                    TextBox::new(&mut f.name)
+                        .placeholder("Название")
+                        .width(name_width)
+                        .id_salt("name"),
+                );
+                let value_width = (width - name_width - controls).max(80.0);
+                if f.secret {
+                    ui.add(
+                        PasswordBox::new(&mut f.value)
+                            .placeholder("Значение")
+                            .width(value_width)
+                            .id_salt("value"),
+                    );
+                } else {
+                    ui.add(
+                        TextBox::new(&mut f.value)
+                            .placeholder("Значение")
+                            .width(value_width)
+                            .id_salt("value"),
+                    );
+                }
+                ui.add(Checkbox::new(&mut f.secret, "Скрытое"));
+                if ui
+                    .add(Button::new("✕").min_size(vec2(32.0, 30.0)))
+                    .on_hover_text("Удалить поле")
+                    .clicked()
+                {
+                    remove = Some(i);
+                }
+            });
+        });
+    }
+    if let Some(i) = remove {
+        fields.remove(i);
+    }
+    if ui.add(Button::new("+ Добавить поле")).clicked() {
+        fields.push(CustomField::default());
+    }
 }

@@ -1,11 +1,13 @@
 //! Settings: appearance, locking, the clipboard and the master password.
 
+use std::path::PathBuf;
+
 use egui::Ui;
 use fluent_egui::{
-    Button, Expander, InfoBar, NumberBox, PasswordBox, ProgressRing, Severity, TextBox,
-    ToggleSwitch,
+    Button, ContentDialog, DialogResult, Expander, InfoBar, NumberBox, PasswordBox, ProgressRing,
+    Severity, TextBox, ToggleSwitch,
 };
-use keechest_core::{Result, Strength, VaultFile, Zeroizing, strength};
+use keechest_core::{Entry, Result, Strength, VaultFile, Zeroizing, interop, strength};
 
 use crate::session::Env;
 use crate::task::{Poll, Task};
@@ -22,11 +24,32 @@ pub struct SettingsState {
     preset: KdfPreset,
     task: Option<Task<Result<VaultFile>>>,
     error: Option<String>,
+    kdbx: Option<KdbxImport>,
+    confirm_export: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ImportSource {
+    KeePass,
+    Csv,
+}
+
+/// The KeePass import dialog.
+struct KdbxImport {
+    path: PathBuf,
+    password: Zeroizing<String>,
+    keyfile: Option<PathBuf>,
+    task: Option<Task<Result<Vec<Entry>>>>,
+    error: Option<String>,
 }
 
 pub enum SettingsAction {
     None,
     Rename(String),
+    /// Entries read from another manager, and where they came from.
+    Import(Vec<Entry>, ImportSource),
+    ExportCsv(PathBuf),
+    Error(String),
     /// A key for the new master password; the session switches to it.
     Rekeyed(Box<VaultFile>),
 }
@@ -42,6 +65,8 @@ impl SettingsState {
             preset: KdfPreset::Standard,
             task: None,
             error: None,
+            kdbx: None,
+            confirm_export: false,
         }
     }
 
@@ -168,8 +193,167 @@ pub fn ui(
             Expander::new("change_master", "Сменить мастер-пароль").show(ui, |ui| {
                 change_password_ui(ui, state, file);
             });
+
+            section(ui, "Импорт и экспорт");
+            ui.label(caption(
+                ui,
+                "Записи добавляются к существующим, точные дубликаты пропускаются.",
+            ));
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui.add(Button::new("Импорт из KeePass (.kdbx)…")).clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("KeePass", &["kdbx", "kdb"])
+                        .pick_file()
+                {
+                    state.kdbx = Some(KdbxImport {
+                        path,
+                        password: Zeroizing::default(),
+                        keyfile: None,
+                        task: None,
+                        error: None,
+                    });
+                }
+                if ui.add(Button::new("Импорт из CSV…")).clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("CSV", &["csv"])
+                        .pick_file()
+                {
+                    action = match std::fs::read(&path)
+                        .map(Zeroizing::new)
+                        .map_err(keechest_core::Error::from)
+                        .and_then(|data| interop::import_csv(&data))
+                    {
+                        Ok(entries) => SettingsAction::Import(entries, ImportSource::Csv),
+                        Err(e) => SettingsAction::Error(error_text(&e)),
+                    };
+                }
+                if ui.add(Button::new("Экспорт в CSV…")).clicked() {
+                    state.confirm_export = true;
+                }
+            });
+            ui.label(caption(
+                ui,
+                "CSV подходит для KeePassXC, Bitwarden, Chrome, Firefox и других менеджеров.",
+            ));
         });
+
+    let ctx = ui.ctx().clone();
+    if let Some(a) = kdbx_dialog(&ctx, state) {
+        action = a;
+    }
+    if state.confirm_export {
+        let result = ContentDialog::new("confirm_export", "Экспортировать без шифрования?")
+            .body(
+                "В CSV-файле все пароли будут открытым текстом. Любой, кто получит файл, \
+                 прочитает их. Удалите его, как только перенесёте данные.",
+            )
+            .primary_button("Выбрать файл…")
+            .close_button("Отмена")
+            .show(&ctx);
+        if let Some(result) = result {
+            state.confirm_export = false;
+            if result == DialogResult::Primary
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("CSV", &["csv"])
+                    .set_file_name("keechest-export.csv")
+                    .save_file()
+            {
+                action = SettingsAction::ExportCsv(path);
+            }
+        }
+    }
     action
+}
+
+fn kdbx_dialog(ctx: &egui::Context, state: &mut SettingsState) -> Option<SettingsAction> {
+    let import = state.kdbx.as_mut()?;
+    if let Some(task) = &import.task {
+        match task.poll() {
+            Poll::Pending => {}
+            Poll::Done(Ok(entries)) => {
+                state.kdbx = None;
+                return Some(SettingsAction::Import(entries, ImportSource::KeePass));
+            }
+            Poll::Done(Err(e)) => {
+                import.task = None;
+                import.password.clear();
+                import.error = Some(error_text(&e));
+            }
+            Poll::Failed => {
+                import.task = None;
+                import.error = Some("Внутренняя ошибка при чтении базы KeePass.".into());
+            }
+        }
+    }
+    let busy = import.task.is_some();
+    let (result, enter) = ContentDialog::new("kdbx_import", "Импорт из KeePass")
+        .body(format!("Файл: {}", import.path.display()))
+        .primary_button("Импортировать")
+        .close_button("Отмена")
+        .width(420.0)
+        .show_with(ctx, |ui| {
+            let mut enter = false;
+            ui.add_enabled_ui(!busy, |ui| {
+                let field = ui.add(
+                    PasswordBox::new(&mut import.password)
+                        .placeholder("Мастер-пароль базы KeePass")
+                        .width(ui.available_width())
+                        .id_salt("kdbx_password"),
+                );
+                enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.horizontal(|ui| {
+                    let label = match &import.keyfile {
+                        Some(p) => format!("Ключевой файл: {}", crate::start::file_name(p)),
+                        None => "Без ключевого файла".into(),
+                    };
+                    ui.label(caption(ui, label));
+                    if ui.add(Button::hyperlink("Выбрать…")).clicked()
+                        && let Some(p) = rfd::FileDialog::new().pick_file()
+                    {
+                        import.keyfile = Some(p);
+                    }
+                    if import.keyfile.is_some() && ui.add(Button::hyperlink("Убрать")).clicked()
+                    {
+                        import.keyfile = None;
+                    }
+                });
+            });
+            if busy {
+                ui.horizontal(|ui| {
+                    ui.add(ProgressRing::indeterminate().size(20.0));
+                    ui.label("Расшифровка…");
+                });
+            }
+            if let Some(error) = &import.error {
+                InfoBar::new(error.as_str())
+                    .severity(Severity::Error)
+                    .show(ui);
+            }
+            enter
+        });
+    match result {
+        Some(DialogResult::Primary) if !busy => start_kdbx(ctx, import),
+        Some(DialogResult::Primary) | None => {
+            if enter && !busy {
+                start_kdbx(ctx, import);
+            }
+        }
+        Some(_) => state.kdbx = None,
+    }
+    None
+}
+
+fn start_kdbx(ctx: &egui::Context, import: &mut KdbxImport) {
+    import.error = None;
+    let path = import.path.clone();
+    let keyfile = import.keyfile.clone();
+    let password = import.password.clone();
+    import.task = Some(Task::spawn(ctx, move || {
+        let data = Zeroizing::new(std::fs::read(path)?);
+        let key = keyfile.map(std::fs::read).transpose()?.map(Zeroizing::new);
+        interop::import_kdbx(&data, &password, key.as_deref().map(|k| k.as_slice()))
+    }));
 }
 
 fn change_password_ui(ui: &mut Ui, state: &mut SettingsState, file: &VaultFile) {
