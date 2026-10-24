@@ -1,0 +1,23 @@
+[package]
+name = "keechest"
+description = "A local password manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+keechest-core.workspace = true
+fluent_egui.workspace = true
+egui.workspace = true
+eframe.workspace = true
+zeroize.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rfd = "0.15"
+arboard = "3"
+directories = "6"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/keechest-core", "crates/keechest"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+repository = "https://github.com/georgebigscar-spec/keechest"
+
+[workspace.dependencies]
+keechest-core = { path = "crates/keechest-core" }
+fluent_egui = { git = "https://github.com/georgebigscar-spec/fluent_egui" }
+egui = "0.37"
+eframe = "0.37"
+zeroize = { version = "1.8", features = ["derive", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# Argon2 is painfully slow unoptimized; keep debug builds usable.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+
