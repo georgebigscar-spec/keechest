@@ -4,6 +4,11 @@ use egui::{RichText, Ui};
 use fluent_egui::{ComboBox, FluentTheme, ProgressBar, combo_value};
 use keechest_core::{Error, KdfParams, Strength};
 
+/// Height of the main buttons: taller where they are tapped with a finger.
+pub const BUTTON_HEIGHT: f32 = if crate::platform::TOUCH { 40.0 } else { 32.0 };
+/// Height of the buttons beside fields, such as "Copy".
+pub const SMALL_BUTTON_HEIGHT: f32 = if crate::platform::TOUCH { 36.0 } else { 26.0 };
+
 /// A colored bar and a caption for a password's strength.
 pub fn strength_meter(ui: &mut Ui, strength: Strength, width: f32) {
     if strength.bits == 0 {

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/keechest-core", "crates/keechest"]
+members = ["crates/keechest-core", "crates/keechest", "crates/keechest-android"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,9 +10,10 @@ repository = "https://github.com/georgebigscar-spec/keechest"
 
 [workspace.dependencies]
 keechest-core = { path = "crates/keechest-core" }
-fluent_egui = { git = "https://github.com/georgebigscar-spec/fluent_egui" }
+# The branch has dialogs that fit a phone screen; back to main once merged.
+fluent_egui = { git = "https://github.com/georgebigscar-spec/fluent_egui", branch = "claude/project-thread-kqq0fp" }
 egui = "0.37"
-eframe = "0.37"
+eframe = { version = "0.37", default-features = false }
 zeroize = { version = "1.8", features = ["derive", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

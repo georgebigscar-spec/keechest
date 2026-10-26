@@ -37,7 +37,7 @@ impl Default for Config {
 }
 
 fn config_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "KeeChest").map(|d| d.config_dir().join("config.json"))
+    crate::platform::config_dir().map(|d| d.join("config.json"))
 }
 
 impl Config {
@@ -66,13 +66,34 @@ impl Config {
 
     /// Where a new vault goes by default.
     pub fn default_vault_path() -> PathBuf {
-        let dir = directories::UserDirs::new()
-            .and_then(|u| {
-                u.document_dir()
-                    .map(PathBuf::from)
-                    .or(Some(u.home_dir().into()))
+        crate::platform::vault_dir().join(format!("KeeChest.{}", keechest_core::format::EXTENSION))
+    }
+
+    /// A path for a vault named `name` in the default directory that no
+    /// file has yet.
+    pub fn new_vault_path(name: &str) -> PathBuf {
+        let stem: String = name
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || " -_".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
             })
-            .unwrap_or_default();
-        dir.join(format!("KeeChest.{}", keechest_core::format::EXTENSION))
+            .collect();
+        let stem = match stem.trim() {
+            "" => "KeeChest",
+            s => s,
+        };
+        let dir = crate::platform::vault_dir();
+        let ext = keechest_core::format::EXTENSION;
+        (1..)
+            .map(|n| match n {
+                1 => dir.join(format!("{stem}.{ext}")),
+                n => dir.join(format!("{stem} ({n}).{ext}")),
+            })
+            .find(|p| !p.exists())
+            .expect("some name is free")
     }
 }
