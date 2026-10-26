@@ -31,9 +31,8 @@ jobs:
         with:
           gradle-version: "8.14.3"
 
+      # cargo-ndk finds the runner's NDK through ANDROID_NDK_ROOT.
       - name: Build the native library
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
         run: >
           cargo ndk -t arm64-v8a -t x86_64 --platform 26
           -o android/app/src/main/jniLibs
