@@ -49,6 +49,17 @@ cargo run --release -p keechest   # «Другое хранилище…» → d
 На Linux для окна нужны libxkbcommon-x11 и драйверы OpenGL/Vulkan, которые
 обычно уже стоят в настольной системе.
 
+## Готовые сборки
+
+Workflow «Build» в GitHub Actions собирает программу для Linux (x86_64,
+`.tar.gz`), Windows (x86_64, `.zip`) и Android (`.apk`, arm64 и x86_64) на
+каждый пуш в `main` и каждый pull request; файлы лежат в артефактах прогона.
+Тег вида `v0.2.0` дополнительно публикует их как релиз:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
 ## Android
 
 Тот же код собирается в приложение для Android 8.0 и новее
@@ -86,8 +97,7 @@ gradle -p android assembleRelease
 # android/app/build/outputs/apk/release/app-release.apk
 ```
 
-Готовый APK собирает GitHub Actions (workflow «Android», артефакт
-`keechest-android`). Без ключа подписи APK подписан одноразовым отладочным
+Готовый APK собирает GitHub Actions (см. «Готовые сборки» выше). Без ключа подписи APK подписан одноразовым отладочным
 ключом сборщика, и следующая сборка не установится поверх: придётся удалить
 приложение (сохраните резервную копию!). Чтобы обновления ставились поверх,
 создайте свой ключ и добавьте секреты репозитория
