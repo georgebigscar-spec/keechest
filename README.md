@@ -1,3 +1,5 @@
+<img src="assets/keechest.png" width="96" align="left" alt="">
+
 # KeeChest
 
 Локальный менеджер паролей на Rust для компьютера и Android. Интерфейс в стиле
@@ -54,6 +56,15 @@ cargo run --release -p keechest   # «Другое хранилище…» → d
 Workflow «Build» в GitHub Actions собирает программу для Linux (x86_64,
 `.tar.gz`), Windows (x86_64, `.zip`) и Android (`.apk`, arm64 и x86_64) на
 каждый пуш в `main` и каждый pull request; файлы лежат в артефактах прогона.
+В архиве для Linux есть `keechest.desktop` и иконка. Чтобы программа
+появилась в меню приложений:
+
+```sh
+install -Dm755 keechest ~/.local/bin/keechest
+install -Dm644 keechest.png ~/.local/share/icons/hicolor/128x128/apps/keechest.png
+install -Dm644 keechest.desktop ~/.local/share/applications/keechest.desktop
+```
+
 Тег вида `v0.2.0` дополнительно публикует их как релиз:
 
 ```sh
@@ -153,6 +164,7 @@ base64 -w0 keechest.jks
 | `crates/keechest` | Приложение на eframe и fluent_egui. |
 | `crates/keechest-android` | Библиотека `libkeechest_android.so`: вход для Android и обратные вызовы из Java. |
 | `android/` | Проект Gradle: `MainActivity` (выбор файлов, буфер обмена, клавиатура), манифест, иконка. |
+| `assets/` | Иконка (`keechest.png`, `.ico` для Windows) и `keechest.desktop` для Linux. |
 
 ```sh
 cargo test --workspace

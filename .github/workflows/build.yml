@@ -31,6 +31,7 @@ jobs:
           dir=keechest-linux-x86_64
           mkdir "$dir"
           cp target/release/keechest README.md LICENSE "$dir"/
+          cp assets/keechest.png assets/keechest.desktop "$dir"/
           tar czf "$dir.tar.gz" "$dir"
       - uses: actions/upload-artifact@v5
         with:

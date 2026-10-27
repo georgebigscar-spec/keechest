@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[build-dependencies]
+winresource = "0.1"
+
 [dependencies]
 keechest-core.workspace = true
 fluent_egui.workspace = true
