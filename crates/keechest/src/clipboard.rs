@@ -1,15 +1,22 @@
 //! Copying secrets with automatic clearing.
 
+#[cfg(target_os = "android")]
+pub use android::SecureClipboard;
+
+#[cfg(not(target_os = "android"))]
 use std::time::{Duration, Instant};
 
+#[cfg(not(target_os = "android"))]
 use zeroize::Zeroizing;
 
+#[cfg(not(target_os = "android"))]
 pub struct SecureClipboard {
     inner: Option<arboard::Clipboard>,
     /// What we put there and when to clear it.
     pending: Option<(Zeroizing<String>, Instant)>,
 }
 
+#[cfg(not(target_os = "android"))]
 impl SecureClipboard {
     pub fn new() -> Self {
         Self {
@@ -58,13 +65,14 @@ impl SecureClipboard {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl Drop for SecureClipboard {
     fn drop(&mut self) {
         self.clear_now();
     }
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
 fn set_private(cb: &mut arboard::Clipboard, text: &str) -> Result<(), arboard::Error> {
     use arboard::SetExtLinux;
     cb.set().exclude_from_history().text(text)
@@ -83,4 +91,43 @@ fn set_private(cb: &mut arboard::Clipboard, text: &str) -> Result<(), arboard::E
 fn set_private(cb: &mut arboard::Clipboard, text: &str) -> Result<(), arboard::Error> {
     use arboard::SetExtApple;
     cb.set().exclude_from_history().text(text)
+}
+
+/// On Android the activity copies, marking the clip sensitive so the system
+/// doesn't preview it, and runs the clear timer itself: the app may be in
+/// the background (and not drawing frames) when it runs out.
+#[cfg(target_os = "android")]
+mod android {
+    use std::time::Duration;
+
+    use crate::platform::android::{clear_secret, copy_secret};
+
+    pub struct SecureClipboard;
+
+    impl SecureClipboard {
+        pub fn new() -> Self {
+            Self
+        }
+
+        pub fn copy(
+            &mut self,
+            ctx: &egui::Context,
+            text: &str,
+            clear_after: Option<Duration>,
+        ) -> bool {
+            let ms = clear_after.map_or(0, |d| d.as_millis() as u64);
+            if copy_secret(text, ms) {
+                clear_after.is_some()
+            } else {
+                ctx.copy_text(text.to_owned());
+                false
+            }
+        }
+
+        pub fn tick(&mut self) {}
+
+        pub fn clear_now(&mut self) {
+            clear_secret();
+        }
+    }
 }

@@ -1,6 +1,7 @@
 //! The unlocked vault: navigation, the entry list, details and the editor.
 
 use std::collections::HashSet;
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use egui::{
@@ -20,8 +21,14 @@ use zeroize::Zeroize;
 use crate::clipboard::SecureClipboard;
 use crate::config::Config;
 use crate::generator_page::{self, GeneratorAction, GeneratorState};
+use crate::platform;
 use crate::settings_page::{self, ImportSource, SettingsAction, SettingsState};
-use crate::widgets::{caption, error_text, format_time, strength_meter};
+use crate::widgets::{
+    BUTTON_HEIGHT, SMALL_BUTTON_HEIGHT, caption, error_text, format_time, strength_meter,
+};
+
+/// Below this width the list and the selected entry take turns on screen.
+const SINGLE_PANE_WIDTH: f32 = 560.0;
 
 /// What the session shares with the app.
 pub struct Env<'a> {
@@ -100,6 +107,27 @@ impl Session {
 
     pub fn file(&self) -> &VaultFile {
         &self.file
+    }
+
+    /// The system Back button: closes what is open, one step at a time.
+    /// Returns false when there is nothing left to close.
+    pub fn back(&mut self) -> bool {
+        if self.confirm_delete.take().is_some() || self.settings.close_dialog() {
+            return true;
+        }
+        if self.editor.take().is_some() {
+            return true;
+        }
+        if self.selected.take().is_some() {
+            self.reveal = Reveal::default();
+            return true;
+        }
+        if self.page != Page::All {
+            self.page = Page::All;
+            self.search.clear();
+            return true;
+        }
+        false
     }
 
     fn notify(&mut self, title: &str, message: impl Into<String>, severity: Severity) {
@@ -230,7 +258,7 @@ impl Session {
             .anchor(egui::Align2::CENTER_BOTTOM, vec2(0.0, -20.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                ui.set_width(460.0);
+                ui.set_width(460.0f32.min(ctx.content_rect().width() - 24.0));
                 let mut bar = InfoBar::new(n.title.as_str())
                     .severity(n.severity)
                     .closable(true);
@@ -247,57 +275,80 @@ impl Session {
     fn list_page(&mut self, ui: &mut Ui, env: &mut Env, page: &Page, groups: &[String]) -> Action {
         let theme = FluentTheme::of(ui.ctx());
         let mut action = Action::None;
-        egui::Frame::NONE
-            .inner_margin(Margin::symmetric(20, 16))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(theme.typography.title.rich(self.page_title(page)));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        CommandBar::new().show(ui, |bar| {
-                            if bar
-                                .button("🔒", "Заблокировать")
-                                .on_hover_text("Ctrl+L")
-                                .clicked()
-                            {
-                                action = Action::Lock;
-                            }
-                            bar.separator();
-                            if bar
-                                .button("+", "Новая запись")
-                                .on_hover_text("Ctrl+N")
-                                .clicked()
-                            {
-                                self.new_entry();
-                            }
-                        });
+        let single = ui.available_width() < SINGLE_PANE_WIDTH;
+        let margin = if single {
+            Margin::symmetric(12, 8)
+        } else {
+            Margin::symmetric(20, 16)
+        };
+        egui::Frame::NONE.inner_margin(margin).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(theme.typography.title.rich(self.page_title(page)));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    CommandBar::new().show(ui, |bar| {
+                        // A phone has no room for the labels.
+                        let lock = if single {
+                            bar.icon_button("🔒").on_hover_text("Заблокировать")
+                        } else {
+                            bar.button("🔒", "Заблокировать").on_hover_text("Ctrl+L")
+                        };
+                        if lock.clicked() {
+                            action = Action::Lock;
+                        }
+                        bar.separator();
+                        let new = if single {
+                            bar.icon_button("+").on_hover_text("Новая запись")
+                        } else {
+                            bar.button("+", "Новая запись").on_hover_text("Ctrl+N")
+                        };
+                        if new.clicked() {
+                            self.new_entry();
+                        }
                     });
                 });
-                ui.add_space(8.0);
-
-                let rect = ui.available_rect_before_wrap();
-                let list_width = (rect.width() * 0.4).clamp(220.0, 340.0);
-                let list_rect = Rect::from_min_size(rect.min, vec2(list_width, rect.height()));
-                let detail_rect =
-                    Rect::from_min_max(pos2(list_rect.right() + 17.0, rect.top()), rect.max);
-                let mut list_ui = ui.new_child(
-                    UiBuilder::new()
-                        .max_rect(list_rect)
-                        .layout(Layout::top_down(Align::Min)),
-                );
-                self.list_ui(&mut list_ui, page);
-                ui.painter().vline(
-                    list_rect.right() + 8.0,
-                    rect.y_range(),
-                    Stroke::new(1.0, theme.resources.divider_stroke_color_default),
-                );
-                let mut detail_ui = ui.new_child(
-                    UiBuilder::new()
-                        .max_rect(detail_rect)
-                        .layout(Layout::top_down(Align::Min)),
-                );
-                self.detail_area(&mut detail_ui, env, groups);
-                ui.advance_cursor_after_rect(rect);
             });
+            ui.add_space(8.0);
+
+            if single {
+                if self.editor.is_some() || self.selected.is_some() {
+                    if ui
+                        .add(Button::new("← К списку").min_size(vec2(0.0, SMALL_BUTTON_HEIGHT)))
+                        .clicked()
+                    {
+                        self.back();
+                    }
+                    ui.add_space(8.0);
+                    self.detail_area(ui, env, groups);
+                } else {
+                    self.list_ui(ui, page);
+                }
+                return;
+            }
+
+            let rect = ui.available_rect_before_wrap();
+            let list_width = (rect.width() * 0.4).clamp(220.0, 340.0);
+            let list_rect = Rect::from_min_size(rect.min, vec2(list_width, rect.height()));
+            let detail_rect =
+                Rect::from_min_max(pos2(list_rect.right() + 17.0, rect.top()), rect.max);
+            let mut list_ui = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(list_rect)
+                    .layout(Layout::top_down(Align::Min)),
+            );
+            self.list_ui(&mut list_ui, page);
+            ui.painter().vline(
+                list_rect.right() + 8.0,
+                rect.y_range(),
+                Stroke::new(1.0, theme.resources.divider_stroke_color_default),
+            );
+            let mut detail_ui = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(detail_rect)
+                    .layout(Layout::top_down(Align::Min)),
+            );
+            self.detail_area(&mut detail_ui, env, groups);
+            ui.advance_cursor_after_rect(rect);
+        });
         action
     }
 
@@ -522,8 +573,14 @@ impl Session {
                             self.notify("Импорт завершён", message, Severity::Success);
                         }
                     }
-                    SettingsAction::ExportCsv(path) => {
-                        match keechest_core::interop::export_csv_file(&self.vault, &path) {
+                    SettingsAction::ExportCsv(mut file) => {
+                        let written =
+                            keechest_core::interop::export_csv(&self.vault).and_then(|csv| {
+                                file.write_all(&csv)?;
+                                file.sync_all()?;
+                                Ok(())
+                            });
+                        match written {
                             Ok(()) => self.notify(
                                 "Экспорт завершён",
                                 format!(
@@ -535,6 +592,24 @@ impl Session {
                             Err(e) => self.notify(
                                 "Не удалось экспортировать",
                                 error_text(&e),
+                                Severity::Error,
+                            ),
+                        }
+                    }
+                    SettingsAction::Backup(mut file) => {
+                        let written = std::fs::read(self.file.path()).and_then(|bytes| {
+                            file.write_all(&bytes)?;
+                            file.sync_all()
+                        });
+                        match written {
+                            Ok(()) => self.notify(
+                                "Резервная копия сохранена",
+                                "Она открывается тем же мастер-паролем.",
+                                Severity::Success,
+                            ),
+                            Err(e) => self.notify(
+                                "Не удалось сохранить копию",
+                                error_text(&e.into()),
                                 Severity::Error,
                             ),
                         }
@@ -596,7 +671,7 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut Reveal) -> DetailAction {
         .id_salt("detail")
         .auto_shrink([false; 2])
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(theme.typography.subtitle.rich(entry.title.as_str()));
                 if entry.favorite {
                     ui.label(RichText::new("★").size(18.0));
@@ -608,10 +683,10 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut Reveal) -> DetailAction {
 
             if !entry.username.is_empty() {
                 field_label(ui, "Логин");
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(entry.username.as_str());
                     if ui
-                        .add(Button::new("Копировать").min_size(vec2(0.0, 26.0)))
+                        .add(Button::new("Копировать").min_size(vec2(0.0, SMALL_BUTTON_HEIGHT)))
                         .clicked()
                     {
                         action = DetailAction::Copy(
@@ -623,7 +698,7 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut Reveal) -> DetailAction {
             }
 
             field_label(ui, "Пароль");
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if entry.password.is_empty() {
                     ui.label(caption(ui, "не задан"));
                     return;
@@ -643,13 +718,13 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut Reveal) -> DetailAction {
                     "Показать"
                 };
                 if ui
-                    .add(Button::new(toggle).min_size(vec2(0.0, 26.0)))
+                    .add(Button::new(toggle).min_size(vec2(0.0, SMALL_BUTTON_HEIGHT)))
                     .clicked()
                 {
                     reveal.password = !reveal.password;
                 }
                 if ui
-                    .add(Button::new("Копировать").min_size(vec2(0.0, 26.0)))
+                    .add(Button::new("Копировать").min_size(vec2(0.0, SMALL_BUTTON_HEIGHT)))
                     .clicked()
                 {
                     action = DetailAction::Copy(
@@ -661,7 +736,7 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut Reveal) -> DetailAction {
 
             if !entry.url.is_empty() {
                 field_label(ui, "Адрес");
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let url = entry.url.as_str();
                     let lower = url.to_ascii_lowercase();
                     if lower.starts_with("https://") || lower.starts_with("http://") {
@@ -672,7 +747,7 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut Reveal) -> DetailAction {
                         ui.label(url);
                     }
                     if ui
-                        .add(Button::new("Копировать").min_size(vec2(0.0, 26.0)))
+                        .add(Button::new("Копировать").min_size(vec2(0.0, SMALL_BUTTON_HEIGHT)))
                         .clicked()
                     {
                         action = DetailAction::Copy(
@@ -696,7 +771,7 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut Reveal) -> DetailAction {
                     },
                 );
                 ui.push_id(("field", i), |ui| {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         let shown = !f.secret || reveal.fields.contains(&i);
                         if shown {
                             let text = RichText::new(f.value.as_str());
@@ -714,7 +789,7 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut Reveal) -> DetailAction {
                                 "Показать"
                             };
                             if ui
-                                .add(Button::new(toggle).min_size(vec2(0.0, 26.0)))
+                                .add(Button::new(toggle).min_size(vec2(0.0, SMALL_BUTTON_HEIGHT)))
                                 .clicked()
                                 && !reveal.fields.remove(&i)
                             {
@@ -722,7 +797,7 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut Reveal) -> DetailAction {
                             }
                         }
                         if ui
-                            .add(Button::new("Копировать").min_size(vec2(0.0, 26.0)))
+                            .add(Button::new("Копировать").min_size(vec2(0.0, SMALL_BUTTON_HEIGHT)))
                             .clicked()
                         {
                             action = DetailAction::Copy(
@@ -747,7 +822,7 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut Reveal) -> DetailAction {
                 )
                 .show(ui, |ui| {
                     for (i, h) in entry.history.iter().enumerate() {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.label(caption(ui, format_time(h.replaced)));
                             if reveal.password {
                                 ui.label(RichText::new(h.password.as_str()).monospace());
@@ -756,7 +831,10 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut Reveal) -> DetailAction {
                             }
                             if ui
                                 .push_id(i, |ui| {
-                                    ui.add(Button::new("Копировать").min_size(vec2(0.0, 24.0)))
+                                    ui.add(
+                                        Button::new("Копировать")
+                                            .min_size(vec2(0.0, SMALL_BUTTON_HEIGHT)),
+                                    )
                                 })
                                 .inner
                                 .clicked()
@@ -781,8 +859,11 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut Reveal) -> DetailAction {
                 ),
             ));
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                if ui.add(Button::filled("Изменить")).clicked() {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add(Button::filled("Изменить").min_size(vec2(0.0, BUTTON_HEIGHT)))
+                    .clicked()
+                {
                     action = DetailAction::Edit;
                 }
                 let fav = if entry.favorite {
@@ -790,10 +871,16 @@ fn detail_ui(ui: &mut Ui, entry: &Entry, reveal: &mut Reveal) -> DetailAction {
                 } else {
                     "В избранное"
                 };
-                if ui.add(Button::new(fav)).clicked() {
+                if ui
+                    .add(Button::new(fav).min_size(vec2(0.0, BUTTON_HEIGHT)))
+                    .clicked()
+                {
                     action = DetailAction::ToggleFavorite;
                 }
-                if ui.add(Button::new("Удалить")).clicked() {
+                if ui
+                    .add(Button::new("Удалить").min_size(vec2(0.0, BUTTON_HEIGHT)))
+                    .clicked()
+                {
                     action = DetailAction::Delete;
                 }
             });
@@ -867,7 +954,8 @@ fn editor_ui(
                     .width(width)
                     .id_salt("ed_title"),
             );
-            if std::mem::take(&mut ed.focus) {
+            // On a phone the keyboard would cover half the form at once.
+            if std::mem::take(&mut ed.focus) && !platform::TOUCH {
                 title.request_focus();
             }
 
@@ -951,10 +1039,11 @@ fn editor_ui(
             }
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if ui.add(Button::filled("Сохранить")).clicked() {
+                let size = vec2(0.0, BUTTON_HEIGHT);
+                if ui.add(Button::filled("Сохранить").min_size(size)).clicked() {
                     action = EditorAction::Save;
                 }
-                if ui.add(Button::new("Отмена")).clicked() {
+                if ui.add(Button::new("Отмена").min_size(size)).clicked() {
                     action = EditorAction::Cancel;
                 }
             });
@@ -975,16 +1064,11 @@ fn fields_editor(ui: &mut Ui, fields: &mut Vec<CustomField>, width: f32) {
     let width = ui.available_width().min(width + 180.0);
     let name_width = (width * 0.3).round();
     let controls = 130.0 + 3.0 * ui.spacing().item_spacing.x;
+    // On a narrow screen each field takes two rows.
+    let stacked = width < 420.0;
     for (i, f) in fields.iter_mut().enumerate() {
         ui.push_id(("ed_field", i), |ui| {
-            ui.horizontal(|ui| {
-                ui.add(
-                    TextBox::new(&mut f.name)
-                        .placeholder("Название")
-                        .width(name_width)
-                        .id_salt("name"),
-                );
-                let value_width = (width - name_width - controls).max(80.0);
+            let value_ui = |ui: &mut Ui, f: &mut CustomField, value_width: f32| {
                 if f.secret {
                     ui.add(
                         PasswordBox::new(&mut f.value)
@@ -1000,12 +1084,44 @@ fn fields_editor(ui: &mut Ui, fields: &mut Vec<CustomField>, width: f32) {
                             .id_salt("value"),
                     );
                 }
+            };
+            let controls_ui = |ui: &mut Ui, f: &mut CustomField| {
                 ui.add(Checkbox::new(&mut f.secret, "Скрытое"));
-                if ui
-                    .add(Button::new("✕").min_size(vec2(32.0, 30.0)))
+                ui.add(Button::new("✕").min_size(vec2(32.0, 30.0)))
                     .on_hover_text("Удалить поле")
                     .clicked()
-                {
+            };
+            if stacked {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let name_width = width - 40.0 - ui.spacing().item_spacing.x;
+                    ui.add(
+                        TextBox::new(&mut f.name)
+                            .placeholder("Название")
+                            .width(name_width)
+                            .id_salt("name"),
+                    );
+                    if ui
+                        .add(Button::new("✕").min_size(vec2(40.0, SMALL_BUTTON_HEIGHT)))
+                        .clicked()
+                    {
+                        remove = Some(i);
+                    }
+                });
+                value_ui(ui, f, width);
+                ui.add(Checkbox::new(&mut f.secret, "Скрытое"));
+                return;
+            }
+            ui.horizontal(|ui| {
+                ui.add(
+                    TextBox::new(&mut f.name)
+                        .placeholder("Название")
+                        .width(name_width)
+                        .id_salt("name"),
+                );
+                let value_width = (width - name_width - controls).max(80.0);
+                value_ui(ui, f, value_width);
+                if controls_ui(ui, f) {
                     remove = Some(i);
                 }
             });

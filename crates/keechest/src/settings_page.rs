@@ -1,6 +1,7 @@
 //! Settings: appearance, locking, the clipboard and the master password.
 
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::Read;
 
 use egui::Ui;
 use fluent_egui::{
@@ -9,6 +10,7 @@ use fluent_egui::{
 };
 use keechest_core::{Entry, Result, Strength, VaultFile, Zeroizing, interop, strength};
 
+use crate::platform::{self, FileKind, Picked};
 use crate::session::Env;
 use crate::task::{Poll, Task};
 use crate::widgets::{KdfPreset, caption, describe_kdf, error_text, section, strength_meter};
@@ -26,6 +28,17 @@ pub struct SettingsState {
     error: Option<String>,
     kdbx: Option<KdbxImport>,
     confirm_export: bool,
+    /// A file picker that is open, and what for.
+    picker: Option<(Task<Picked>, Pick)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pick {
+    KeePass,
+    KeyFile,
+    Csv,
+    ExportCsv,
+    Backup,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -36,9 +49,11 @@ pub enum ImportSource {
 
 /// The KeePass import dialog.
 struct KdbxImport {
-    path: PathBuf,
+    name: String,
+    data: Zeroizing<Vec<u8>>,
     password: Zeroizing<String>,
-    keyfile: Option<PathBuf>,
+    /// Name and contents.
+    keyfile: Option<(String, Zeroizing<Vec<u8>>)>,
     task: Option<Task<Result<Vec<Entry>>>>,
     error: Option<String>,
 }
@@ -48,13 +63,93 @@ pub enum SettingsAction {
     Rename(String),
     /// Entries read from another manager, and where they came from.
     Import(Vec<Entry>, ImportSource),
-    ExportCsv(PathBuf),
+    /// Write the vault as CSV to this file.
+    ExportCsv(File),
+    /// Write a copy of the (encrypted) vault file to this file.
+    Backup(File),
     Error(String),
     /// A key for the new master password; the session switches to it.
     Rekeyed(Box<VaultFile>),
 }
 
 impl SettingsState {
+    fn pick(&mut self, ctx: &egui::Context, what: Pick) {
+        let task = match what {
+            Pick::KeePass => platform::open_file(ctx, FileKind::KeePass),
+            Pick::KeyFile => platform::open_file(ctx, FileKind::KeyFile),
+            Pick::Csv => platform::open_file(ctx, FileKind::Csv),
+            Pick::ExportCsv => platform::create_file(ctx, FileKind::Csv, "keechest-export.csv"),
+            Pick::Backup => {
+                let name = self.name.trim();
+                let name = if name.is_empty() { "KeeChest" } else { name };
+                let name = format!("{name}.{}", keechest_core::format::EXTENSION);
+                platform::create_file(ctx, FileKind::Vault, &name)
+            }
+        };
+        self.picker = Some((task, what));
+    }
+
+    /// Acts on the file the user picked, once they have.
+    fn poll_picker(&mut self) -> Option<SettingsAction> {
+        let (task, what) = self.picker.as_ref()?;
+        let what = *what;
+        let picked = match task.poll() {
+            Poll::Pending => return None,
+            Poll::Done(p) => p,
+            Poll::Failed => Ok(None),
+        };
+        self.picker = None;
+        let picked = match picked {
+            Ok(Some(p)) => p,
+            Ok(None) => return None,
+            Err(e) => return Some(SettingsAction::Error(error_text(&e.into()))),
+        };
+        let read = |mut f: File| -> Result<Zeroizing<Vec<u8>>> {
+            let mut data = Zeroizing::new(Vec::new());
+            f.read_to_end(&mut data)?;
+            Ok(data)
+        };
+        let action = match what {
+            Pick::ExportCsv => SettingsAction::ExportCsv(picked.file),
+            Pick::Backup => SettingsAction::Backup(picked.file),
+            Pick::Csv => match read(picked.file).and_then(|data| interop::import_csv(&data)) {
+                Ok(entries) => SettingsAction::Import(entries, ImportSource::Csv),
+                Err(e) => SettingsAction::Error(error_text(&e)),
+            },
+            Pick::KeePass => match read(picked.file) {
+                Ok(data) => {
+                    self.kdbx = Some(KdbxImport {
+                        name: picked.name,
+                        data,
+                        password: Zeroizing::default(),
+                        keyfile: None,
+                        task: None,
+                        error: None,
+                    });
+                    SettingsAction::None
+                }
+                Err(e) => SettingsAction::Error(error_text(&e)),
+            },
+            Pick::KeyFile => {
+                match (read(picked.file), self.kdbx.as_mut()) {
+                    (Ok(data), Some(import)) => import.keyfile = Some((picked.name, data)),
+                    (Err(e), Some(import)) => import.error = Some(error_text(&e)),
+                    (_, None) => {}
+                }
+                SettingsAction::None
+            }
+        };
+        Some(action)
+    }
+
+    /// Closes an open dialog. Returns whether there was one.
+    pub fn close_dialog(&mut self) -> bool {
+        let open = self.kdbx.is_some() || self.confirm_export;
+        self.kdbx = None;
+        self.confirm_export = false;
+        open
+    }
+
     pub fn new(name: String) -> Self {
         Self {
             name,
@@ -67,6 +162,7 @@ impl SettingsState {
             error: None,
             kdbx: None,
             confirm_export: false,
+            picker: None,
         }
     }
 
@@ -129,7 +225,7 @@ pub fn ui(
 
             section(ui, "Блокировка");
             let mut minutes = f64::from(cfg.autolock_minutes);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.add(
                     NumberBox::new(&mut minutes)
                         .range(0.0..=240.0)
@@ -146,7 +242,11 @@ pub fn ui(
             if ui
                 .add(ToggleSwitch::new(
                     &mut cfg.lock_on_minimize,
-                    "Блокировать при сворачивании окна",
+                    if platform::TOUCH {
+                        "Блокировать при переходе в фон"
+                    } else {
+                        "Блокировать при сворачивании окна"
+                    },
                 ))
                 .changed()
             {
@@ -155,7 +255,7 @@ pub fn ui(
 
             section(ui, "Буфер обмена");
             let mut seconds = f64::from(cfg.clipboard_seconds);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.add(
                     NumberBox::new(&mut seconds)
                         .range(0.0..=600.0)
@@ -174,10 +274,10 @@ pub fn ui(
             ui.label(file.path().display().to_string());
             ui.label(caption(ui, describe_kdf(file.kdf())));
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.add(
                     TextBox::new(&mut state.name)
-                        .width(WIDTH)
+                        .width(WIDTH.min(ui.available_width()))
                         .id_salt("vault_name"),
                 );
                 let name = state.name.trim();
@@ -188,6 +288,21 @@ pub fn ui(
                     action = SettingsAction::Rename(name.to_owned());
                 }
             });
+
+            ui.add_space(6.0);
+            if ui
+                .add_enabled(
+                    state.picker.is_none(),
+                    Button::new("Сохранить резервную копию…"),
+                )
+                .clicked()
+            {
+                state.pick(ui.ctx(), Pick::Backup);
+            }
+            ui.label(caption(
+                ui,
+                "Копия зашифрована тем же мастер-паролем, её можно хранить где угодно.",
+            ));
 
             ui.add_space(12.0);
             Expander::new("change_master", "Сменить мастер-пароль").show(ui, |ui| {
@@ -200,35 +315,25 @@ pub fn ui(
                 "Записи добавляются к существующим, точные дубликаты пропускаются.",
             ));
             ui.add_space(4.0);
+            let idle = state.picker.is_none();
             ui.horizontal_wrapped(|ui| {
-                if ui.add(Button::new("Импорт из KeePass (.kdbx)…")).clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .add_filter("KeePass", &["kdbx", "kdb"])
-                        .pick_file()
+                let ctx = ui.ctx().clone();
+                if ui
+                    .add_enabled(idle, Button::new("Импорт из KeePass (.kdbx)…"))
+                    .clicked()
                 {
-                    state.kdbx = Some(KdbxImport {
-                        path,
-                        password: Zeroizing::default(),
-                        keyfile: None,
-                        task: None,
-                        error: None,
-                    });
+                    state.pick(&ctx, Pick::KeePass);
                 }
-                if ui.add(Button::new("Импорт из CSV…")).clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .add_filter("CSV", &["csv"])
-                        .pick_file()
+                if ui
+                    .add_enabled(idle, Button::new("Импорт из CSV…"))
+                    .clicked()
                 {
-                    action = match std::fs::read(&path)
-                        .map(Zeroizing::new)
-                        .map_err(keechest_core::Error::from)
-                        .and_then(|data| interop::import_csv(&data))
-                    {
-                        Ok(entries) => SettingsAction::Import(entries, ImportSource::Csv),
-                        Err(e) => SettingsAction::Error(error_text(&e)),
-                    };
+                    state.pick(&ctx, Pick::Csv);
                 }
-                if ui.add(Button::new("Экспорт в CSV…")).clicked() {
+                if ui
+                    .add_enabled(idle, Button::new("Экспорт в CSV…"))
+                    .clicked()
+                {
                     state.confirm_export = true;
                 }
             });
@@ -239,6 +344,9 @@ pub fn ui(
         });
 
     let ctx = ui.ctx().clone();
+    if let Some(a) = state.poll_picker() {
+        action = a;
+    }
     if let Some(a) = kdbx_dialog(&ctx, state) {
         action = a;
     }
@@ -253,13 +361,8 @@ pub fn ui(
             .show(&ctx);
         if let Some(result) = result {
             state.confirm_export = false;
-            if result == DialogResult::Primary
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("CSV", &["csv"])
-                    .set_file_name("keechest-export.csv")
-                    .save_file()
-            {
-                action = SettingsAction::ExportCsv(path);
+            if result == DialogResult::Primary {
+                state.pick(&ctx, Pick::ExportCsv);
             }
         }
     }
@@ -286,9 +389,10 @@ fn kdbx_dialog(ctx: &egui::Context, state: &mut SettingsState) -> Option<Setting
             }
         }
     }
-    let busy = import.task.is_some();
+    let busy = import.task.is_some() || state.picker.is_some();
+    let mut pick_keyfile = false;
     let (result, enter) = ContentDialog::new("kdbx_import", "Импорт из KeePass")
-        .body(format!("Файл: {}", import.path.display()))
+        .body(format!("Файл: {}", import.name))
         .primary_button("Импортировать")
         .close_button("Отмена")
         .width(420.0)
@@ -304,14 +408,12 @@ fn kdbx_dialog(ctx: &egui::Context, state: &mut SettingsState) -> Option<Setting
                 enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 ui.horizontal(|ui| {
                     let label = match &import.keyfile {
-                        Some(p) => format!("Ключевой файл: {}", crate::start::file_name(p)),
+                        Some((name, _)) => format!("Ключевой файл: {name}"),
                         None => "Без ключевого файла".into(),
                     };
                     ui.label(caption(ui, label));
-                    if ui.add(Button::hyperlink("Выбрать…")).clicked()
-                        && let Some(p) = rfd::FileDialog::new().pick_file()
-                    {
-                        import.keyfile = Some(p);
+                    if ui.add(Button::hyperlink("Выбрать…")).clicked() {
+                        pick_keyfile = true;
                     }
                     if import.keyfile.is_some() && ui.add(Button::hyperlink("Убрать")).clicked()
                     {
@@ -332,6 +434,10 @@ fn kdbx_dialog(ctx: &egui::Context, state: &mut SettingsState) -> Option<Setting
             }
             enter
         });
+    if pick_keyfile {
+        state.pick(ctx, Pick::KeyFile);
+        return None;
+    }
     match result {
         Some(DialogResult::Primary) if !busy => start_kdbx(ctx, import),
         Some(DialogResult::Primary) | None => {
@@ -346,12 +452,10 @@ fn kdbx_dialog(ctx: &egui::Context, state: &mut SettingsState) -> Option<Setting
 
 fn start_kdbx(ctx: &egui::Context, import: &mut KdbxImport) {
     import.error = None;
-    let path = import.path.clone();
-    let keyfile = import.keyfile.clone();
+    let data = import.data.clone();
+    let key = import.keyfile.as_ref().map(|(_, k)| k.clone());
     let password = import.password.clone();
     import.task = Some(Task::spawn(ctx, move || {
-        let data = Zeroizing::new(std::fs::read(path)?);
-        let key = keyfile.map(std::fs::read).transpose()?.map(Zeroizing::new);
         interop::import_kdbx(&data, &password, key.as_deref().map(|k| k.as_slice()))
     }));
 }
@@ -363,23 +467,23 @@ fn change_password_ui(ui: &mut Ui, state: &mut SettingsState, file: &VaultFile) 
         ui.add(
             PasswordBox::new(&mut state.current)
                 .placeholder("Текущий мастер-пароль")
-                .width(WIDTH)
+                .width(WIDTH.min(ui.available_width()))
                 .id_salt("cur_master"),
         );
         let new = ui.add(
             PasswordBox::new(&mut state.new)
                 .placeholder("Новый мастер-пароль")
-                .width(WIDTH)
+                .width(WIDTH.min(ui.available_width()))
                 .id_salt("new_master2"),
         );
         if new.changed() {
             state.strength = strength::estimate(&state.new, &[]);
         }
-        strength_meter(ui, state.strength, WIDTH);
+        strength_meter(ui, state.strength, WIDTH.min(ui.available_width()));
         ui.add(
             PasswordBox::new(&mut state.confirm)
                 .placeholder("Повторите новый пароль")
-                .width(WIDTH)
+                .width(WIDTH.min(ui.available_width()))
                 .id_salt("confirm_master2"),
         );
         ui.label(caption(ui, "Защита ключа (Argon2id)"));

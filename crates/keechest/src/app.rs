@@ -6,6 +6,7 @@ use fluent_egui::{Brightness, FluentTheme, Localizations, fonts};
 
 use crate::clipboard::SecureClipboard;
 use crate::config::Config;
+use crate::platform;
 use crate::session::{Action, Env, Session};
 use crate::start::StartScreen;
 
@@ -26,6 +27,15 @@ impl App {
         let mut defs = egui::FontDefinitions::default();
         fonts::add_selawik(&mut defs);
         ctx.set_fonts(defs);
+        if platform::TOUCH {
+            // Room for a fingertip between tappable things, and no
+            // tooltips popping up after a long press.
+            ctx.all_styles_mut(|style| {
+                style.spacing.interact_size.y = style.spacing.interact_size.y.max(32.0);
+                style.spacing.item_spacing.y = style.spacing.item_spacing.y.max(6.0);
+                style.interaction.tooltip_delay = f32::INFINITY;
+            });
+        }
         let cfg = Config::load();
         let first = cfg.recent.first().filter(|p| p.exists()).cloned();
         let app = Self {
@@ -70,6 +80,13 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        platform::begin_frame(&ctx);
+        // Locks before anything is drawn when coming back from the
+        // background.
+        if platform::take_backgrounded() && self.cfg.lock_on_minimize {
+            self.lock(&ctx);
+        }
+        let back = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack));
         let active = ctx.input(|i| !i.events.is_empty() || i.pointer.is_moving());
         if active {
             self.last_activity = Instant::now();
@@ -78,6 +95,9 @@ impl eframe::App for App {
 
         match &mut self.screen {
             Screen::Start(start) => {
+                if back && !start.back() {
+                    platform::leave();
+                }
                 let theme = FluentTheme::of(&ctx);
                 let mut opened = None;
                 egui::CentralPanel::default()
@@ -92,6 +112,9 @@ impl eframe::App for App {
                 }
             }
             Screen::Unlocked(session) => {
+                if back && !session.back() {
+                    platform::leave();
+                }
                 let mut env = Env {
                     cfg: &mut self.cfg,
                     clipboard: &mut self.clipboard,
@@ -116,6 +139,7 @@ impl eframe::App for App {
                 }
             }
         }
+        platform::end_frame(&ctx);
         // Keep the auto-lock and clipboard timers running while idle.
         ctx.request_repaint_after(Duration::from_secs(1));
     }

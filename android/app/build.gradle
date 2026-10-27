@@ -1,0 +1,50 @@
+plugins {
+    id "com.android.application"
+}
+
+// Release signing comes from the environment (see the Android section of
+// the README). Without it the release APK is signed with the debug key.
+def keystore = System.getenv("KEECHEST_KEYSTORE")
+
+android {
+    namespace "io.github.keechest"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "io.github.keechest"
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName "0.1.0"
+    }
+
+    signingConfigs {
+        release {
+            if (keystore) {
+                storeFile file(keystore)
+                storePassword System.getenv("KEECHEST_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("KEECHEST_KEY_ALIAS")
+                keyPassword System.getenv("KEECHEST_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig keystore ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        jniLibs {
+            // The library is loaded from the APK without extracting it.
+            useLegacyPackaging false
+        }
+    }
+}

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=KeeChest
+GenericName=Password Manager
+GenericName[ru]=Менеджер паролей
+Comment=Local password manager
+Comment[ru]=Локальный менеджер паролей
+Exec=keechest
+Icon=keechest
+Terminal=false
+Categories=Utility;Security;
+StartupWMClass=keechest
